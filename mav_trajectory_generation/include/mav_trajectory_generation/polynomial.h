@@ -27,8 +27,6 @@
 #include <utility>
 #include <vector>
 
-#include "mav_trajectory_generation/rpoly.h"
-
 namespace mav_trajectory_generation {
 
 // Implementation of polynomials of order N-1. Order must be known at
@@ -38,13 +36,17 @@ namespace mav_trajectory_generation {
 // where N = number of coefficients of the polynomial.
 class Polynomial {
  public:
-  typedef std::vector<Polynomial, Eigen::aligned_allocator<Polynomial>> Vector;
+  typedef std::vector<Polynomial> Vector;
 
   // Maximum degree of a polynomial for which the static derivative (basis
   // coefficient) matrix should be evaluated for.
+  // kMaxN = max. number of coefficients.
   static constexpr int kMaxN = 12;
+  // kMaxConvolutionSize = max. convolution size for N = 12, convolved with its
+  // derivative.
+  static constexpr int kMaxConvolutionSize = 2 * kMaxN - 2;
   // One static shared across all members of the class, computed up to order
-  // kMaxN.
+  // kMaxConvolutionSize.
   static Eigen::MatrixXd base_coefficients_;
 
   Polynomial(int N) : N_(N), coefficients_(N) { coefficients_.setZero(); }
@@ -55,8 +57,33 @@ class Polynomial {
     CHECK_EQ(N_, coeffs.size()) << "Number of coefficients has to match.";
   }
 
+  Polynomial(const Eigen::VectorXd& coeffs)
+      : N_(coeffs.size()), coefficients_(coeffs) {}
   /// Gets the number of coefficients (order + 1) of the polynomial.
   int N() const { return N_; }
+
+  inline bool operator==(const Polynomial& rhs) const {
+    return coefficients_ == rhs.coefficients_;
+  }
+  inline bool operator!=(const Polynomial& rhs) const {
+    return !operator==(rhs);
+  }
+  inline Polynomial operator+(const Polynomial& rhs) const {
+    return Polynomial(coefficients_ + rhs.coefficients_);
+  }
+  inline Polynomial& operator+=(const Polynomial& rhs) {
+    this->coefficients_ += rhs.coefficients_;
+    return *this;
+  }
+  // The product of two polynomials is the convolution of their coefficients.
+  inline Polynomial operator*(const Polynomial& rhs) const {
+    return Polynomial(convolve(coefficients_, rhs.coefficients_));
+  }
+  // The product of a polynomial with a scalar. Note that polynomials are in
+  // general not homogeneous, i.e., f(a*t) != a*f(t)
+  inline Polynomial operator*(const double& rhs) const {
+    return Polynomial(coefficients_ * rhs);
+  }
 
   // Sets up the internal representation from coefficients.
   // Coefficients are stored in increasing order with the power of t,
@@ -77,10 +104,9 @@ class Polynomial {
       result.setZero();
       result.head(N_ - derivative) =
           coefficients_.tail(N_ - derivative)
-              .cwiseProduct(
-                  base_coefficients_
-                      .block(derivative, derivative, 1, N_ - derivative)
-                      .transpose());
+              .cwiseProduct(base_coefficients_.block(derivative, derivative, 1,
+                                                     N_ - derivative)
+                                .transpose());
       return result;
     }
   }
@@ -121,26 +147,49 @@ class Polynomial {
     return result;
   }
 
-  // Computes the complex roots of the polynomial.
-  // Only for the polynomial itself, not for its derivatives.
-  Eigen::VectorXcd computeRoots() const {
-    //      Companion matrix method , see
-    //      http://en.wikipedia.org/wiki/Companion_matrix.
-    //      Works, but is not very stable for high condition numbers. Could be
-    //      eigen's eigensolver.
-    //      However, would not need the dependency to rpoly.
-    //      const size_t nc = N - 1;
-    //      typedef Eigen::Matrix<double, nc, nc> CompanionMatrix;
-    //      CompanionMatrix companion;
-    //      companion.template row(0).setZero();
-    //      companion.template block<nc - 1, nc - 1>(1, 0).setIdentity();
-    //      companion.template col(nc - 1) = - coefficients_.template head<nc>()
-    //      / coefficients_[N - 1];
-    //
-    //      Eigen::EigenSolver<CompanionMatrix> es(companion, false);
-    //      return es.eigenvalues();
-    return findRootsJenkinsTraub(coefficients_);
-  }
+  // Uses Jenkins-Traub to get all the roots of the polynomial at a certain
+  //
+  bool getRoots(int derivative, Eigen::VectorXcd* roots) const;
+
+  // Finds all candidates for the minimum and maximum between t_start and t_end
+  // by evaluating the roots of the polynomial's derivative.
+  static bool selectMinMaxCandidatesFromRoots(
+      double t_start, double t_end,
+      const Eigen::VectorXcd& roots_derivative_of_derivative,
+      std::vector<double>* candidates);
+
+  // Finds all candidates for the minimum and maximum between t_start and t_end
+  // by computing the roots of the derivative polynomial.
+  bool computeMinMaxCandidates(double t_start, double t_end, int derivative,
+                               std::vector<double>* candidates) const;
+
+  // Evaluates the minimum and maximum of a polynomial between time t_start and
+  // t_end given the roots of the derivative.
+  // Returns the minimum and maximum as pair<t, value>.
+  bool selectMinMaxFromRoots(
+      double t_start, double t_end, int derivative,
+      const Eigen::VectorXcd& roots_derivative_of_derivative,
+      std::pair<double, double>* minimum,
+      std::pair<double, double>* maximum) const;
+
+  // Computes the minimum and maximum of a polynomial between time t_start and
+  // t_end by computing the roots of the derivative polynomial.
+  // Returns the minimum and maximum as pair<t, value>.
+  bool computeMinMax(double t_start, double t_end, int derivative,
+                     std::pair<double, double>* minimum,
+                     std::pair<double, double>* maximum) const;
+
+  // Selects the minimum and maximum of a polynomial among a candidate set.
+  // Returns the minimum and maximum as pair<t, value>.
+  bool selectMinMaxFromCandidates(const std::vector<double>& candidates,
+                                  int derivative,
+                                  std::pair<double, double>* minimum,
+                                  std::pair<double, double>* maximum) const;
+
+  // Increase the number of coefficients of this polynomial up to the specified
+  // degree by appending zeros.
+  bool getPolynomialWithAppendedCoefficients(int new_N,
+                                             Polynomial* new_polynomial) const;
 
   // Computes the base coefficients with the according powers of t, as
   // e.g. needed for computation of (in)equality constraints.
@@ -177,9 +226,16 @@ class Polynomial {
     return c;
   }
 
- private:
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  // Discrete convolution of two vectors.
+  // convolve(d, k)[m] = sum(d[m - n] * k[n])
+  static Eigen::VectorXd convolve(const Eigen::VectorXd& data,
+                                  const Eigen::VectorXd& kernel);
 
+  static inline int getConvolutionLength(int data_size, int kernel_size) {
+    return data_size + kernel_size - 1;
+  }
+
+ private:
   int N_;
   Eigen::VectorXd coefficients_;
 };

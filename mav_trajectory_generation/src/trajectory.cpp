@@ -20,7 +20,23 @@
 
 #include "mav_trajectory_generation/trajectory.h"
 
+#include <limits>
+
 namespace mav_trajectory_generation {
+
+bool Trajectory::operator==(const Trajectory& rhs) const {
+  if (segments_.size() != rhs.segments_.size()) {
+    // Different number of segments.
+    return false;
+  } else {
+    for (int i = 0; i < K(); i++) {
+      if (segments_ != rhs.segments_) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
 
 Eigen::VectorXd Trajectory::evaluate(double t, int derivative_order) const {
   double accumulated_time = 0.0;
@@ -42,6 +58,12 @@ Eigen::VectorXd Trajectory::evaluate(double t, int derivative_order) const {
   if (t > accumulated_time) {
     LOG(ERROR) << "Time out of range of the trajectory!";
     return Eigen::VectorXd::Zero(D(), 1);
+  }
+
+  // Make sure we don't go off the end of the segments (can happen if t is
+  // equal to trajectory max time).
+  if (i >= segments_.size()) {
+    i = segments_.size() - 1;
   }
   // Go back to the start of this segment.
   accumulated_time -= segments_[i].getTime();
@@ -129,16 +151,17 @@ Trajectory Trajectory::getTrajectoryWithSingleDimension(int dimension) const {
   return traj;
 }
 
-Trajectory Trajectory::getTrajectoryWithAppendedDimension(
-    const Trajectory& trajectory_to_append) const {
+bool Trajectory::getTrajectoryWithAppendedDimension(
+    const Trajectory& trajectory_to_append, Trajectory* new_trajectory) const {
   // Handle the case of one of the trajectories being empty.
   if (N_ == 0 || D_ == 0) {
-    return trajectory_to_append;
+    *new_trajectory = trajectory_to_append;
+    return true;
   }
   if (trajectory_to_append.N() == 0 || trajectory_to_append.D() == 0) {
-    return *this;
+    *new_trajectory = *this;
+    return true;
   }
-  CHECK_EQ(N_, trajectory_to_append.N());
   CHECK_EQ(static_cast<int>(segments_.size()), trajectory_to_append.K());
 
   // Create a new set of segments with all of the dimensions.
@@ -146,20 +169,99 @@ Trajectory Trajectory::getTrajectoryWithAppendedDimension(
   segments.reserve(segments_.size());
 
   for (size_t k = 0; k < segments_.size(); ++k) {
-    Segment segment(N_, D_ + trajectory_to_append.D());
-    segment.setTime(segments_[k].getTime());
-    for (int d = 0; d < D_; ++d) {
-      segment[d] = (segments_[k])[d];
+    Segment new_segment(0, 0);
+    if (!segments_[k].getSegmentWithAppendedDimension(
+            trajectory_to_append.segments()[k], &new_segment)) {
+      return false;
     }
-    for (int d = 0; d < trajectory_to_append.D(); ++d) {
-      segment[D_ + d] = (trajectory_to_append.segments()[k])[d];
-    }
-    segments.push_back(segment);
+    segments.push_back(new_segment);
   }
 
-  Trajectory traj;
-  traj.setSegments(segments);
-  return traj;
+  new_trajectory->setSegments(segments);
+  return true;
+}
+
+bool Trajectory::computeMinMaxMagnitude(int derivative,
+                                        const std::vector<int>& dimensions,
+                                        Extremum* minimum,
+                                        Extremum* maximum) const {
+  CHECK_NOTNULL(minimum);
+  CHECK_NOTNULL(maximum);
+  minimum->value = std::numeric_limits<double>::max();
+  maximum->value = std::numeric_limits<double>::lowest();
+
+  // For all segments in the trajectory:
+  for (size_t segment_idx = 0; segment_idx < segments_.size(); segment_idx++) {
+    // Compute candidates.
+    std::vector<Extremum> candidates;
+    if (!segments_[segment_idx].computeMinMaxMagnitudeCandidates(
+            derivative, 0.0, segments_[segment_idx].getTime(), dimensions,
+            &candidates)) {
+      return false;
+    }
+    // Evaluate candidates.
+    Extremum minimum_candidate, maximum_candidate;
+    if (!segments_[segment_idx].selectMinMaxMagnitudeFromCandidates(
+            derivative, 0.0, segments_[segment_idx].getTime(), dimensions,
+            candidates, &minimum_candidate, &maximum_candidate)) {
+      return false;
+    }
+    // Select minimum / maximum.
+    if (minimum_candidate < *minimum) {
+      *minimum = minimum_candidate;
+      minimum->segment_idx = static_cast<int>(segment_idx);
+    }
+    if (maximum_candidate > *maximum) {
+      *maximum = maximum_candidate;
+      maximum->segment_idx = static_cast<int>(segment_idx);
+    }
+  }
+  return true;
+}
+
+std::vector<double> Trajectory::getSegmentTimes() const {
+  std::vector<double> segment_times(segments_.size());
+  for (size_t i = 0; i < segment_times.size(); ++i) {
+    segment_times[i] = segments_[i].getTime();
+  }
+  return segment_times;
+}
+
+bool Trajectory::addTrajectories(const std::vector<Trajectory>& trajectories,
+                                 Trajectory* merged) const {
+  CHECK_NOTNULL(merged);
+  merged->clear();
+  *merged = *this;
+
+  for (const Trajectory& t : trajectories) {
+    // Check dimensions and coefficients.
+    // TODO(rikba): Allow different number of coefficients.
+    if (t.D() != D_ || t.N() != N_) {
+      return false;
+    }
+    // Add segments.
+    Segment::Vector segments;
+    t.getSegments(&segments);
+    merged->addSegments(segments);
+  }
+
+  return true;
+}
+
+Vertex Trajectory::getVertexAtTime(double t, int max_derivative_order) const {
+  Vertex v(D_);
+  for (size_t i = 0; i <= max_derivative_order; i++) {
+    v.addConstraint(i, evaluate(t, i));
+  }
+  return v;
+}
+
+Vertex Trajectory::getStartVertex(int max_derivative_order) const {
+  return getVertexAtTime(0.0, max_derivative_order);
+}
+
+Vertex Trajectory::getGoalVertex(int max_derivative_order) const {
+  return getVertexAtTime(max_time_, max_derivative_order);
 }
 
 }  // namespace mav_trajectory_generation

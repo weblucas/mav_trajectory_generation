@@ -18,11 +18,11 @@
  * limitations under the License.
  */
 
-#ifndef MAV_TRAJECTORY_GENERATION_ROS_TRAJECTORY_SAMPLING_H_
-#define MAV_TRAJECTORY_GENERATION_ROS_TRAJECTORY_SAMPLING_H_
+#ifndef MAV_TRAJECTORY_GENERATION_TRAJECTORY_SAMPLING_H_
+#define MAV_TRAJECTORY_GENERATION_TRAJECTORY_SAMPLING_H_
 
 #include <mav_msgs/eigen_mav_msgs.h>
-#include <mav_trajectory_generation/trajectory.h>
+#include "mav_trajectory_generation/trajectory.h"
 
 namespace mav_trajectory_generation {
 
@@ -47,6 +47,13 @@ bool sampleWholeTrajectory(const Trajectory& trajectory,
                            double sampling_interval,
                            mav_msgs::EigenTrajectoryPoint::Vector* states);
 
+bool sampleSegmentAtTime(const Segment& segment, double sample_time,
+                         mav_msgs::EigenTrajectoryPoint* state);
+
+template<class T>
+bool sampleFlatStateAtTime(const T& type, double sample_time,
+                           mav_msgs::EigenTrajectoryPoint* state);
+
 }  // namespace mav_trajectory_generation
 
-#endif  // MAV_TRAJECTORY_GENERATION_ROS_TRAJECTORY_SAMPLING_H_
+#endif  // MAV_TRAJECTORY_GENERATION_TRAJECTORY_SAMPLING_H_

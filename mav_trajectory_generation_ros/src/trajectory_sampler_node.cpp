@@ -37,9 +37,14 @@ TrajectorySamplerNode::TrajectorySamplerNode(const ros::NodeHandle& nh,
       "path_segments", 10, &TrajectorySamplerNode::pathSegmentsCallback, this);
   stop_srv_ = nh_.advertiseService(
       "stop_sampling", &TrajectorySamplerNode::stopSamplingCallback, this);
+  position_hold_client_ =
+      nh_.serviceClient<std_srvs::Empty>("back_to_position_hold");
+
+  const bool oneshot = false;
+  const bool autostart = false;
   publish_timer_ = nh_.createTimer(ros::Duration(dt_),
                                    &TrajectorySamplerNode::commandTimerCallback,
-                                   this, false);
+                                   this, oneshot, autostart);
 }
 
 TrajectorySamplerNode::~TrajectorySamplerNode() { publish_timer_.stop(); }
@@ -60,6 +65,12 @@ void TrajectorySamplerNode::pathSegmentsCallback(
     return;
   }
 
+  // Call the service call to takeover publishing commands.
+  if (position_hold_client_.exists()) {
+    std_srvs::Empty empty_call;
+    position_hold_client_.call(empty_call);
+  }
+
   if (publish_whole_trajectory_) {
     // Publish the entire trajectory at once.
     mav_msgs::EigenTrajectoryPoint::Vector flat_states;
@@ -70,7 +81,7 @@ void TrajectorySamplerNode::pathSegmentsCallback(
     command_pub_.publish(msg_pub);
   } else {
     publish_timer_.start();
-    current_sample_time_ = 0;
+    current_sample_time_ = 0.0;
     start_time_ = ros::Time::now();
   }
 }
